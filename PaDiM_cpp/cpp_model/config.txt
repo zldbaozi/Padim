@@ -1,0 +1,5 @@
+input_width=112
+input_height=112
+feature_map_h=28
+feature_map_w=28
+feature_dim=100
