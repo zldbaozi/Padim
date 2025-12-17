@@ -1,0 +1,24 @@
+# 训练配置
+training:
+  batch_size: 8
+  image_size: 256
+  reduce_dims: 100
+  random_seed: 42
+
+# 数据配置
+data:
+  train_dir: "./data/train/normal"
+  test_dir: "./data/test"
+  output_dir: "./output"
+
+# 模型配置
+model:
+  backbone: "wide_resnet50_2"
+  feature_layers: ["layer2", "layer3", "layer4"]
+  device: "cuda"
+
+# 推理配置
+inference:
+  threshold: 10.0
+  save_visualization: true
+  visualization_dir: "./results"

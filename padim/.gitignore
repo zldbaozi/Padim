@@ -1,0 +1,5 @@
+.vscode/
+venv/
+datasets/
+imgs/
+saved_models/
