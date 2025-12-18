@@ -58,7 +58,7 @@ class PaDiMInferenceEngine:
             transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
 
-    def process_folder(self, input_dir, save_dir, threshold=3.0):
+    def process_folder(self, input_dir, save_dir, threshold=15):
         # 检查输入目录是否存在
         if not os.path.exists(input_dir):
             print(f"❌ 输入目录不存在: {input_dir}")
@@ -101,22 +101,59 @@ class PaDiMInferenceEngine:
             print(f"[{idx+1}/{len(files)}] {f} -> {status} (得分: {score:.2f})")
             
             # ==========================================
-            # 4. 灰度热力图生成
+            # 4. 热力图生成 (Matplotlib 4子图样式，去除黑白图)
             # ==========================================
+            import matplotlib.pyplot as plt
             
-            # Resize 到原图大小
+            # Resize 异常图到原图大小
             amap_resized = cv2.resize(amap, (img_bgr.shape[1], img_bgr.shape[0]))
             
-            # 归一化策略
-            max_val = 4.0  # 固定阈值归一化
-            norm_map = np.clip(amap_resized / max_val, 0, 1)
+            # --- A. 准备数据 ---
+            # 局部归一化 (仅展示当前图内部的相对强弱)
+            local_min, local_max = amap_resized.min(), amap_resized.max()
+            local_norm = (amap_resized - local_min) / (local_max - local_min + 1e-8)
             
-            # 转为 8位 灰度图 (0=黑, 255=白)
-            heatmap_gray = (norm_map * 255).astype(np.uint8)
+            # 全局归一化 (使用 threshold 作为基准)
+            g_min, g_max = 0, threshold
+            global_norm = np.clip((amap_resized - g_min) / (g_max - g_min + 1e-8), 0, 1)
             
-            # 保存结果
-            save_path = os.path.join(save_dir, f)
-            cv_imwrite(save_path, heatmap_gray)
+            # --- B. 绘图 (2x2 布局) ---
+            fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(16, 12))
+            
+            # 1. 原图
+            ax1.imshow(img_rgb)
+            ax1.set_title(f'Original Image\n{f}', fontsize=12)
+            ax1.axis('off')
+            
+            # 2. 局部归一化热力图
+            im2 = ax2.imshow(local_norm, cmap='jet', vmin=0, vmax=1)
+            ax2.set_title(f'Local Normalized Heatmap\nRange: [{local_min:.3f}, {local_max:.3f}]', fontsize=12)
+            ax2.axis('off')
+            plt.colorbar(im2, ax=ax2, fraction=0.046, pad=0.04)
+            
+            # 3. 全局归一化热力图
+            im3 = ax3.imshow(global_norm, cmap='jet', vmin=0, vmax=1)
+            ax3.set_title(f'Global Normalized Heatmap\nRef Range: [0, {threshold}]', fontsize=12)
+            ax3.axis('off')
+            plt.colorbar(im3, ax=ax3, fraction=0.046, pad=0.04)
+            
+            # 4. 叠加显示 (Overlay)
+            ax4.imshow(img_rgb)
+            im4 = ax4.imshow(global_norm, cmap='jet', alpha=0.5, vmin=0, vmax=1)
+            ax4.set_title(f'Overlay (Global Norm)\nScore: {score:.4f} | Status: {status}', fontsize=12)
+            ax4.axis('off')
+            plt.colorbar(im4, ax=ax4, fraction=0.046, pad=0.04)
+            
+            # --- C. 保存 ---
+            save_name = os.path.splitext(f)[0] + '_analysis.png'
+            
+            # 保存到 detection_heatmaps 子文件夹
+            heatmap_dir = os.path.join(save_dir, 'detection_heatmaps')
+            os.makedirs(heatmap_dir, exist_ok=True)
+            
+            save_path = os.path.join(heatmap_dir, save_name)
+            plt.savefig(save_path, bbox_inches='tight', dpi=100, facecolor='white')
+            plt.close(fig) # 关闭图形释放内存
 
         t_end = time.perf_counter()
         avg_time = (t_end - t_start) / len(files) * 1000
@@ -150,7 +187,7 @@ if __name__ == "__main__":
     parser.add_argument('--model_dir', type=str, required=True, help='模型路径')
     parser.add_argument('--test_data', type=str, required=True, help='测试数据文件夹路径')
     parser.add_argument('--save_dir', type=str, default='./results', help='结果保存路径')
-    parser.add_argument('--threshold', type=float, default=3.0, help='异常阈值')
+    parser.add_argument('--threshold', type=float, default=15.0, help='异常阈值')
     
     args = parser.parse_args()
     main(args)

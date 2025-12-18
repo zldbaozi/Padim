@@ -2,6 +2,7 @@ import argparse
 import sys
 import os
 
+
 # 添加路径，确保可以导入其他模块
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -11,7 +12,7 @@ def train_model():
     
     # 硬编码训练参数
     class Args:
-        data_path = "C:\\Users\\mento\\Desktop\\data2\\OK"
+        data_path = "E:\\Code\\Padim\\dataset\\jinyuan\\OK"
         output_dir = "./saved_models"
         batch_size = 8
         image_size = 112
@@ -30,8 +31,8 @@ def detect_anomaly():
     
     class Args:
         model_dir = "./saved_models"
-        test_data = "C:\\Users\\mento\\Desktop\\data2\\NG"
-        threshold = 3.0
+        test_data = "E:\\Code\\Padim\\dataset\\jinyuan"
+        threshold = 10
         batch_size = 1
         image_size = 112
         save_heatmap = True  # 开启热力图功能！
@@ -75,3 +76,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
