@@ -1,345 +1,81 @@
-import os
 import cv2
-import numpy as np
+import os
 
-def filter_by_color(patch_img):
-    """
-    基于 HSV 的银色/白色过滤器
-    逻辑：低饱和度(S) + 中高亮度(V) = 银色/白色/灰色
-    """
-    # 1. 转 HSV
-    hsv = cv2.cvtColor(patch_img, cv2.COLOR_BGR2HSV)
-    
-    # 2. 定义银色/白色的范围
-    # H: 0-180 (任意色调)
-    # S: 0-60 (关键！放宽到60，只要不是鲜艳的黄色/绿色都算)
-    # V: 50-255 (排除黑色背景)
-    lower_silver = np.array([0, 0, 50])
-    upper_silver = np.array([180, 60, 255])
-    
-    # 3. 生成掩码
-    mask = cv2.inRange(hsv, lower_silver, upper_silver)
-    
-    # 4. 计算占比
-    total_pixels = patch_img.shape[0] * patch_img.shape[1]
-    silver_pixels = cv2.countNonZero(mask)
-    ratio = silver_pixels / total_pixels
-    
-    # 5. 设定阈值
-    # 根据你之前的统计，好的图片银色占比约为 0.02 - 0.04
-    # 这里设为 0.015 (1.5%) 作为底线，保证不漏掉好的
-    return ratio > 0.010
+# 全局变量
+center_x, center_y = 500, 500  # 初始中心点坐标
+crop_width, crop_height = 50, 50  # 裁剪区域宽高
+drawing = False  # 标记鼠标是否在拖动
 
-def extract_aligned_patches(img, patch_size=(225, 281), debug=False):
+
+def crop_by_center(img, center_x, center_y, width, height):
     """
-    基于【自适应阈值 + 定向边界剔除 + 补边 + HSV银色特征过滤】的自动对齐切割
+    根据中心点裁剪图像
+    :param img: 输入图像
+    :param center_x: 裁剪区域中心点的 x 坐标
+    :param center_y: 裁剪区域中心点的 y 坐标
+    :param width: 裁剪区域的宽度
+    :param height: 裁剪区域的高度
+    :return: 裁剪后的图像
     """
     h_img, w_img = img.shape[:2]
-    target_w, target_h = patch_size
-    
-    # 1. 预处理
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # 2. 自适应阈值 + 反转 
-    binary = cv2.adaptiveThreshold(
-        blurred, 
-        255, 
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY_INV, 
-        19, 
-        10
-    )
 
-    # 3. 形态学闭运算
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    # 计算裁剪区域的左上角和右下角坐标
+    x1 = max(0, center_x - width // 2)
+    y1 = max(0, center_y - height // 2)
+    x2 = min(w_img, center_x + width // 2)
+    y2 = min(h_img, center_y + height // 2)
 
-    # 4. 查找轮廓
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    patches = []
-    min_area = 1500 
-    max_area = (h_img * w_img) / 5 
+    # 裁剪图像
+    cropped_img = img[y1:y2, x1:x2]
+    return cropped_img
 
-    if debug:
-        debug_img = img.copy()
-        h, w = binary.shape[:2]
-        scale = 1000/max(h,w)
-        cv2.imshow("Binary Debug", cv2.resize(binary, (0,0), fx=scale, fy=scale))
 
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        
-        if min_area < area < max_area:
-            x, y, w, h = cv2.boundingRect(cnt)
-            
-            # --- 定向边界剔除 ---
-            # 剔除贴着 左、上、下 边缘的残缺品
-            # 保留贴着 右 边缘的（后续补边）
-            if x < 5 or y < 5 or (y + h) > (h_img - 5):
-                if debug:
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), (255, 0, 255), 2)
-                continue
+def draw_rectangle(event, x, y, flags, param):
+    """
+    鼠标回调函数，用于更新裁剪框的位置
+    """
+    global center_x, center_y, drawing
 
-            aspect_ratio = float(w) / h
-            
-            if 0.25 < aspect_ratio < 4.0: 
-                
-                M = cv2.moments(cnt)
-                if M["m00"] == 0: continue
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                
-                x1 = cx - target_w // 2
-                y1 = cy - target_h // 2
-                x2 = x1 + target_w
-                y2 = y1 + target_h
-                
-                # --- 自动补边 (Padding) ---
-                patch_canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-                
-                src_x1 = max(0, x1); src_y1 = max(0, y1)
-                src_x2 = min(w_img, x2); src_y2 = min(h_img, y2)
-                
-                dst_x1 = src_x1 - x1; dst_y1 = src_y1 - y1
-                dst_x2 = dst_x1 + (src_x2 - src_x1); dst_y2 = dst_y1 + (src_y2 - src_y1)
-                
-                valid_h = src_y2 - src_y1
-                valid_w = src_x2 - src_x1
-                
-                if valid_h > 10 and valid_w > 10:
-                    patch_canvas[dst_y1:dst_y2, dst_x1:dst_x2] = img[src_y1:src_y2, src_x1:src_x2]
-                    
-                    # --- HSV 颜色过滤 ---
-                    if filter_by_color(patch_canvas):
-                        patches.append(patch_canvas)
-                        if debug:
-                            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1)
-                    else:
-                        if debug:
-                            # 银色占比不够（可能是纯黑背景或纯黄背景）
-                            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 2)
+    if event == cv2.EVENT_MOUSEMOVE and drawing:
+        center_x, center_y = x, y
 
-    if debug:
-        h, w = debug_img.shape[:2]
-        scale = 1000/max(h,w)
-        cv2.imshow("Result Debug (Green=Keep, Purple=Edge Skip)", cv2.resize(debug_img, (0,0), fx=scale, fy=scale))
-        print("按任意键继续...")
-        cv2.waitKey(0)
+    if event == cv2.EVENT_LBUTTONDOWN:
+        drawing = True
 
-    return patches
+    if event == cv2.EVENT_LBUTTONUP:
+        drawing = False
 
-def process_dataset(src_dir, dst_dir, patch_size=(225, 281)):
-    os.makedirs(dst_dir, exist_ok=True)
-    exts = (".bmp", ".png", ".jpg", ".jpeg")
-    
-    files = [f for f in os.listdir(src_dir) if f.lower().endswith(exts)]
-    if not files:
-        print("源目录无图像")
-        return
-
-    total_patches = 0
-    DEBUG_MODE = False 
-    
-    for f in files:
-        path = os.path.join(src_dir, f)
-        img = cv2.imread(path)
-        if img is None: continue
-            
-        print(f"正在处理: {f} ...")
-        patches = extract_aligned_patches(img, patch_size=patch_size, debug=DEBUG_MODE)
-        
-        base = os.path.splitext(f)[0]
-        for i, patch in enumerate(patches):
-            out_name = f"{base}_{i:03d}.png"
-            cv2.imwrite(os.path.join(dst_dir, out_name), patch)
-        
-        print(f"  -> 提取了 {len(patches)} 个补丁")
-        total_patches += len(patches)
-        
-    if DEBUG_MODE:
-        cv2.destroyAllWindows()
-        
-    print(f"全部完成。共生成 {total_patches} 个训练样本。")
 
 if __name__ == "__main__":
-    source_dir = "./dataset/industrial/train"      
-    target_dir = "./dataset/industrial/train/cut"
-    
-    # 你的# filepath: c:\Users\mento\Desktop\padim_project\cut.py
-import os
-import cv2
-import numpy as np
+    # 示例：根据中心点裁剪
+    image_path = "E:\\Code\\Padim\\dataset\\jinyuan4\\001.bmp"  # 替换为你的图像路径
+    img = cv2.imread(image_path)
 
-def filter_by_color(patch_img):
-    """
-    基于 HSV 的银色/白色过滤器
-    逻辑：低饱和度(S) + 中高亮度(V) = 银色/白色/灰色
-    """
-    # 1. 转 HSV
-    hsv = cv2.cvtColor(patch_img, cv2.COLOR_BGR2HSV)
-    
-    # 2. 定义银色/白色的范围
-    # H: 0-180 (任意色调)
-    # S: 0-60 (关键！放宽到60，只要不是鲜艳的黄色/绿色都算)
-    # V: 50-255 (排除黑色背景)
-    lower_silver = np.array([0, 0, 50])
-    upper_silver = np.array([180, 60, 255])
-    
-    # 3. 生成掩码
-    mask = cv2.inRange(hsv, lower_silver, upper_silver)
-    
-    # 4. 计算占比
-    total_pixels = patch_img.shape[0] * patch_img.shape[1]
-    silver_pixels = cv2.countNonZero(mask)
-    ratio = silver_pixels / total_pixels
-    
-    # 5. 设定阈值
-    # 根据你之前的统计，好的图片银色占比约为 0.02 - 0.04
-    # 这里设为 0.015 (1.5%) 作为底线，保证不漏掉好的
-    return ratio > 0.015
+    if img is None:
+        print("无法加载图像，请检查路径！")
+    else:
+        cv2.namedWindow("Image")
+        cv2.setMouseCallback("Image", draw_rectangle)
 
-def extract_aligned_patches(img, patch_size=(225, 281), debug=False):
-    """
-    基于【自适应阈值 + 定向边界剔除 + 补边 + HSV银色特征过滤】的自动对齐切割
-    """
-    h_img, w_img = img.shape[:2]
-    target_w, target_h = patch_size
-    
-    # 1. 预处理
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-    
-    # 2. 自适应阈值 + 反转 
-    binary = cv2.adaptiveThreshold(
-        blurred, 
-        255, 
-        cv2.ADAPTIVE_THRESH_GAUSSIAN_C, 
-        cv2.THRESH_BINARY_INV, 
-        19, 
-        10
-    )
+        while True:
+            # 显示图像并绘制裁剪框
+            temp_img = img.copy()
+            x1 = max(0, center_x - crop_width // 2)
+            y1 = max(0, center_y - crop_height // 2)
+            x2 = min(temp_img.shape[1], center_x + crop_width // 2)
+            y2 = min(temp_img.shape[0], center_y + crop_height // 2)
+            cv2.rectangle(temp_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.imshow("Image", temp_img)
 
-    # 3. 形态学闭运算
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+            key = cv2.waitKey(1) & 0xFF
+            if key == 13:  # 按下 Enter 键确认裁剪
+                cropped = crop_by_center(img, center_x, center_y, crop_width, crop_height)
+                output_path = "E:\\Code\\Padim\\dataset\\jinyuan4\\cut.bmp"
+                cv2.imwrite(output_path, cropped)
+                print(f"裁剪结果已保存到: {output_path}")
+                break
+            elif key == 27:  # 按下 Esc 键退出
+                print("操作已取消。")
+                break
 
-    # 4. 查找轮廓
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-    
-    patches = []
-    min_area = 1500 
-    max_area = (h_img * w_img) / 5 
-
-    if debug:
-        debug_img = img.copy()
-        h, w = binary.shape[:2]
-        scale = 1000/max(h,w)
-        cv2.imshow("Binary Debug", cv2.resize(binary, (0,0), fx=scale, fy=scale))
-
-    for cnt in contours:
-        area = cv2.contourArea(cnt)
-        
-        if min_area < area < max_area:
-            x, y, w, h = cv2.boundingRect(cnt)
-            
-            # --- 定向边界剔除 ---
-            # 剔除贴着 左、上、下 边缘的残缺品
-            # 保留贴着 右 边缘的（后续补边）
-            if x < 5 or y < 5 or (y + h) > (h_img - 5):
-                if debug:
-                    cv2.rectangle(debug_img, (x, y), (x+w, y+h), (255, 0, 255), 2)
-                continue
-
-            aspect_ratio = float(w) / h
-            
-            if 0.25 < aspect_ratio < 4.0: 
-                
-                M = cv2.moments(cnt)
-                if M["m00"] == 0: continue
-                cx = int(M["m10"] / M["m00"])
-                cy = int(M["m01"] / M["m00"])
-                
-                x1 = cx - target_w // 2
-                y1 = cy - target_h // 2
-                x2 = x1 + target_w
-                y2 = y1 + target_h
-                
-                # --- 自动补边 (Padding) ---
-                patch_canvas = np.zeros((target_h, target_w, 3), dtype=np.uint8)
-                
-                src_x1 = max(0, x1); src_y1 = max(0, y1)
-                src_x2 = min(w_img, x2); src_y2 = min(h_img, y2)
-                
-                dst_x1 = src_x1 - x1; dst_y1 = src_y1 - y1
-                dst_x2 = dst_x1 + (src_x2 - src_x1); dst_y2 = dst_y1 + (src_y2 - src_y1)
-                
-                valid_h = src_y2 - src_y1
-                valid_w = src_x2 - src_x1
-                
-                if valid_h > 10 and valid_w > 10:
-                    patch_canvas[dst_y1:dst_y2, dst_x1:dst_x2] = img[src_y1:src_y2, src_x1:src_x2]
-                    
-                    # --- HSV 颜色过滤 ---
-                    if filter_by_color(patch_canvas):
-                        patches.append(patch_canvas)
-                        if debug:
-                            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                            cv2.circle(debug_img, (cx, cy), 5, (0, 0, 255), -1)
-                    else:
-                        if debug:
-                            # 银色占比不够（可能是纯黑背景或纯黄背景）
-                            cv2.rectangle(debug_img, (x1, y1), (x2, y2), (0, 0, 255), 2)
-
-    if debug:
-        h, w = debug_img.shape[:2]
-        scale = 1000/max(h,w)
-        cv2.imshow("Result Debug (Green=Keep, Purple=Edge Skip)", cv2.resize(debug_img, (0,0), fx=scale, fy=scale))
-        print("按任意键继续...")
-        cv2.waitKey(0)
-
-    return patches
-
-def process_dataset(src_dir, dst_dir, patch_size=(225, 281)):
-    os.makedirs(dst_dir, exist_ok=True)
-    exts = (".bmp", ".png", ".jpg", ".jpeg")
-    
-    files = [f for f in os.listdir(src_dir) if f.lower().endswith(exts)]
-    if not files:
-        print("源目录无图像")
-        return
-
-    total_patches = 0
-    DEBUG_MODE = False 
-    
-    for f in files:
-        path = os.path.join(src_dir, f)
-        img = cv2.imread(path)
-        if img is None: continue
-            
-        print(f"正在处理: {f} ...")
-        patches = extract_aligned_patches(img, patch_size=patch_size, debug=DEBUG_MODE)
-        
-        base = os.path.splitext(f)[0]
-        for i, patch in enumerate(patches):
-            out_name = f"{base}_{i:03d}.png"
-            cv2.imwrite(os.path.join(dst_dir, out_name), patch)
-        
-        print(f"  -> 提取了 {len(patches)} 个补丁")
-        total_patches += len(patches)
-        
-    if DEBUG_MODE:
         cv2.destroyAllWindows()
-        
-    print(f"全部完成。共生成 {total_patches} 个训练样本。")
-
-if __name__ == "__main__":
-    source_dir = "./dataset/industrial/train"      
-    target_dir = "./dataset/industrial/train/cut"
-    
-    # 你的尺寸
-    PATCH_SIZE = (225, 281) 
-    
-    process_dataset(source_dir, target_dir, patch_size=PATCH_SIZE)
