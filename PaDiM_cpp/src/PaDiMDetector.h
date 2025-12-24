@@ -41,8 +41,11 @@ private:
     void loadConfig(const std::string& configPath);
     void loadEngine(const std::string& onnxPath);
     void loadParams(const std::string& meansPath, const std::string& covsPath);
-    static constexpr size_t MAX_IMG_SIZE = 400 * 400 * 3 * sizeof(unsigned char); 
     
+    // 新增：专门分配固定大小的缓冲区 (d_input, d_features, d_dist_map)
+    // 这些缓冲区的大小只取决于模型结构 (112x112)，与输入图片实际分辨率无关
+    void allocateFixedBuffers();
+
     // TensorRT 组件
     nvinfer1::IRuntime* runtime = nullptr;
     nvinfer1::ICudaEngine* engine = nullptr;
@@ -52,9 +55,11 @@ private:
     cudaStream_t stream = nullptr;
 
     // GPU 内存指针
+    //1.动态缓冲区
     unsigned char* d_raw_image = nullptr; // 存放原始大图 (动态分配)
     size_t d_raw_image_size = 0;          // 记录当前 d_raw_image 的容量
     
+    //2.固定缓冲区
     void* d_input = nullptr;       // TensorRT 输入 (float, CHW, Normalized)
     void* d_features = nullptr;    // TensorRT 输出特征
     void* d_means = nullptr;       // 均值向量

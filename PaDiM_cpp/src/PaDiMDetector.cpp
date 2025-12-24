@@ -25,10 +25,9 @@ void check(cudaError_t result, char const *const func, const char *const file, i
 PaDiMDetector::PaDiMDetector(const std::string& modelDir) {
     // 创建 CUDA 流
     checkCudaErrors(cudaStreamCreate(&stream));
-    // 🔥 新增：预分配 d_raw_image
-    checkCudaErrors(cudaMalloc((void**)&d_raw_image, MAX_IMG_SIZE));
-    d_raw_image_size = MAX_IMG_SIZE;
-    std::cout << "✅ 预分配显存: " << MAX_IMG_SIZE / 1024 << " KB" << std::endl;
+    
+    d_raw_image = nullptr;
+    d_raw_image_size = 0;
 
     std::string configPath = modelDir + "/config.txt";
     std::string onnxPath = modelDir + "/padim_backbone.onnx";
@@ -36,6 +35,9 @@ PaDiMDetector::PaDiMDetector(const std::string& modelDir) {
     std::string covsPath = modelDir + "/inv_covs.bin";
 
     loadConfig(configPath);
+    // 1. 新增：在加载引擎前，先分配好固定缓冲区
+    // 此时 input_w/h 等参数已经通过 loadConfig 读取完毕
+    allocateFixedBuffers();
     loadEngine(onnxPath);
     loadParams(meansPath, covsPath);
 }
@@ -48,6 +50,8 @@ PaDiMDetector::~PaDiMDetector() {
     if (d_means) cudaFree(d_means);
     if (d_inv_covs) cudaFree(d_inv_covs);
     if (d_dist_map) cudaFree(d_dist_map);
+    if (d_blur_map) cudaFree(d_blur_map); // 新增：别忘了释放这个
+    
     
 
     // 释放 TensorRT 资源
@@ -92,9 +96,31 @@ void PaDiMDetector::loadConfig(const std::string& configPath) {
         }
     }
 
-    std::cout << "   ✅ 配置已加载: Input=" << input_w << "x" << input_h 
+     std::cout << "   ✅ 配置已加载: Input=" << input_w << "x" << input_h 
               << ", Feat=" << feat_w << "x" << feat_h << ", Dim=" << feat_c << std::endl;
 }
+
+// 新增：实现固定缓冲区分配
+void PaDiMDetector::allocateFixedBuffers() {
+    std::cout << "💾 分配固定 GPU 缓冲区..." << std::endl;
+
+    // 1. TensorRT 输入 (Batch=1, CHW)
+    size_t input_size = 1 * 3 * input_h * input_w * sizeof(float);
+    checkCudaErrors(cudaMalloc(&d_input, input_size));
+
+    // 2. TensorRT 输出特征
+    size_t feat_size = 1 * feat_h * feat_w * feat_c * sizeof(float);
+    checkCudaErrors(cudaMalloc(&d_features, feat_size));
+
+    // 3. 距离图 (原始 & 模糊)
+    size_t map_size = feat_h * feat_w * sizeof(float);
+    checkCudaErrors(cudaMalloc(&d_dist_map, map_size));
+    checkCudaErrors(cudaMalloc((void**)&d_blur_map, map_size)); // 预留给高斯模糊
+
+    std::cout << "   - Input Buffer: " << input_size / 1024 << " KB" << std::endl;
+    std::cout << "   - Feature Buffer: " << feat_size / 1024 << " KB" << std::endl;
+}
+
 
 void PaDiMDetector::loadEngine(const std::string& onnxPath) {
     std::cout << "🔄 构建 TensorRT 引擎: " << onnxPath << std::endl;
@@ -155,13 +181,6 @@ void PaDiMDetector::loadEngine(const std::string& onnxPath) {
     delete parser;
     delete network;
     delete builder;
-
-    // 分配显存
-    // d_raw_image 是动态分配的，这里不分配
-    checkCudaErrors(cudaMalloc(&d_input, 1 * 3 * input_h * input_w * sizeof(float)));
-    checkCudaErrors(cudaMalloc(&d_features, 1 * feat_h * feat_w * feat_c * sizeof(float)));
-    checkCudaErrors(cudaMalloc(&d_dist_map, feat_h * feat_w * sizeof(float)));
-   
 }
 
 void PaDiMDetector::loadParams(const std::string& meansPath, const std::string& covsPath) {
@@ -194,12 +213,12 @@ std::pair<cv::Mat, float> PaDiMDetector::predict(const cv::Mat& img) {
     // 1. (移除懒加载，直接加载图片)
     size_t imgSize = img.rows * img.cols * 3 * sizeof(unsigned char);
 
-    // 🔥 新增：安全检查
-    if (imgSize > MAX_IMG_SIZE) {
-        std::cerr << "❌ 错误: 输入图片过大 (" << imgSize/1024 << " KB)！" 
-                  << "超过了预分配显存 (" << MAX_IMG_SIZE/1024 << " KB)。" 
-                  << "请在 .h 文件中增大 MAX_IMG_SIZE。" << std::endl;
-        return {cv::Mat::zeros(img.size(), CV_8UC1), 0.0f};
+    // 🔥 动态扩容显存
+    if (imgSize > d_raw_image_size) {
+        if (d_raw_image) checkCudaErrors(cudaFree(d_raw_image));
+        checkCudaErrors(cudaMalloc((void**)&d_raw_image, imgSize));
+        d_raw_image_size = imgSize;
+        std::cout << "⚠️ 扩容 d_raw_image: " << imgSize / 1024 << " KB" << std::endl;
     }
     
     // =========================================================
@@ -257,12 +276,5 @@ std::pair<cv::Mat, float> PaDiMDetector::predict(const cv::Mat& img) {
     float score_percentage = (float)maxVal / max_threshold * 100.0f;
     if (score_percentage > 100.0f) score_percentage = 100.0f;
 
-    // 3. 全局归一化热力图
-    cv::Mat normalized_map;
-    double scale_factor = 255.0 / max_threshold;
-    
-    // convertTo(dst, type, alpha, beta) -> dst = src * alpha + beta
-    result_map.convertTo(normalized_map, CV_8UC1, scale_factor, 0);
-
-    return {normalized_map, score_percentage};
+    return {result_map, score_percentage}; 
 }

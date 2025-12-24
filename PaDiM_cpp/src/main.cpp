@@ -15,8 +15,8 @@ bool isImageFile(const fs::path& filePath) {
 }
 
 int main() {
-    std::string modelDir = "../cpp_model_testdata2"; 
-    std::string testDir = "C:\\Users\\mento\\Desktop\\data2\\NG"; 
+    std::string modelDir = "../cpp_model_jinyuan3"; 
+    std::string testDir = "E:\\Code\\Padim\\dataset\\jinyuan3\\OK"; 
     std::string outputDir = "./results";
 
     std::cout << "🚀 正在初始化 PaDiM 检测器..." << std::endl;
