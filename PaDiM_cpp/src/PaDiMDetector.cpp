@@ -40,6 +40,9 @@ PaDiMDetector::PaDiMDetector(const std::string& modelDir) {
     allocateFixedBuffers();
     loadEngine(onnxPath);
     loadParams(meansPath, covsPath);
+
+    //🔥 新增：构造函数最后调用热身
+    warmup();
 }
 
 PaDiMDetector::~PaDiMDetector() {
@@ -50,8 +53,6 @@ PaDiMDetector::~PaDiMDetector() {
     if (d_means) cudaFree(d_means);
     if (d_inv_covs) cudaFree(d_inv_covs);
     if (d_dist_map) cudaFree(d_dist_map);
-    if (d_blur_map) cudaFree(d_blur_map); // 新增：别忘了释放这个
-    
     
 
     // 释放 TensorRT 资源
@@ -115,10 +116,31 @@ void PaDiMDetector::allocateFixedBuffers() {
     // 3. 距离图 (原始 & 模糊)
     size_t map_size = feat_h * feat_w * sizeof(float);
     checkCudaErrors(cudaMalloc(&d_dist_map, map_size));
-    checkCudaErrors(cudaMalloc((void**)&d_blur_map, map_size)); // 预留给高斯模糊
+
+    // 4. 🔥 优化：预分配原始图像缓冲区 (假设最大 4K 分辨率，避免 predict 中动态分配)
+    // 3840 * 2160 * 3 = ~24MB，对于显存来说很小
+    size_t max_image_size = 3840 * 2160 * 3 * sizeof(unsigned char);
+    checkCudaErrors(cudaMalloc((void**)&d_raw_image, max_image_size));
+    d_raw_image_size = max_image_size;
 
     std::cout << "   - Input Buffer: " << input_size / 1024 << " KB" << std::endl;
     std::cout << "   - Feature Buffer: " << feat_size / 1024 << " KB" << std::endl;
+    std::cout << "   - Raw Image Buffer (Max): " << max_image_size / 1024 / 1024 << " MB" << std::endl;
+}
+
+// 🔥 新增：热身函数
+void PaDiMDetector::warmup() {
+    std::cout << "🔥 正在热身 GPU (锁定频率)..." << std::endl;
+    // 创建一个假的黑色图像
+    cv::Mat dummy = cv::Mat::zeros(input_h, input_w, CV_8UC3);
+    
+    // 连续推理 10 次，强制 GPU 升频并保持状态
+    for(int i=0; i<10; ++i) {
+        predict(dummy);
+    }
+    // 强制同步，确保热身完成
+    cudaStreamSynchronize(stream);
+    std::cout << "✅ 热身完成，推理引擎已就绪" << std::endl;
 }
 
 
@@ -213,12 +235,12 @@ std::pair<cv::Mat, float> PaDiMDetector::predict(const cv::Mat& img) {
     // 1. (移除懒加载，直接加载图片)
     size_t imgSize = img.rows * img.cols * 3 * sizeof(unsigned char);
 
-    // 🔥 动态扩容显存
+    // 🔥 优化：移除动态扩容逻辑
+    // 我们已经在 allocateFixedBuffers 中分配了足够大的空间
+    // 如果图片真的超过 4K，这里加一个安全检查即可
     if (imgSize > d_raw_image_size) {
-        if (d_raw_image) checkCudaErrors(cudaFree(d_raw_image));
-        checkCudaErrors(cudaMalloc((void**)&d_raw_image, imgSize));
-        d_raw_image_size = imgSize;
-        std::cout << "⚠️ 扩容 d_raw_image: " << imgSize / 1024 << " KB" << std::endl;
+        std::cerr << "❌ 错误: 输入图片过大，超过预分配缓冲区!" << std::endl;
+        return {cv::Mat(), 0.0f};
     }
     
     // =========================================================
@@ -246,35 +268,28 @@ std::pair<cv::Mat, float> PaDiMDetector::predict(const cv::Mat& img) {
         feat_h, feat_w, feat_c, stream
     );
 
-    // 6. 下载结果 (异步启动)
+    // 6. 下载结果 (只下载 28x28 的小图，速度极快)
     cv::Mat amap(feat_h, feat_w, CV_32FC1);
     checkCudaErrors(cudaMemcpyAsync(amap.data, d_dist_map, feat_h * feat_w * sizeof(float), cudaMemcpyDeviceToHost, stream));
 
-    // =========================================================
-    // 🛑 同步点 (CPU 在这里等待 GPU 完成所有工作)
-    // =========================================================
+    // 🛑 同步点
     checkCudaErrors(cudaStreamSynchronize(stream));
 
     // =========================================================
-    // 🖥️ CPU 后处理阶段
+    // 🖥️ CPU 后处理
     // =========================================================
     
     double minVal, maxVal;
     cv::minMaxLoc(amap, &minVal, &maxVal);
 
-    cv::Mat result_map;
-    cv::resize(amap, result_map, img.size()); // 这里的 resize 可能会有 0.x ms 的耗时
+    // ❌ 不需要 Resize 了，直接用小图计算得分
+    // cv::Mat result_map;
+    // cv::resize(amap, result_map, img.size()); 
 
-   // ------------------------------------------------------------
-    // 🔧 核心修改：百分制得分与全局归一化
-    // ------------------------------------------------------------
-
-    // 1. 设定满分阈值 
     float max_threshold = 100.0f; 
-
-    // 2. 计算百分比
     float score_percentage = (float)maxVal / max_threshold * 100.0f;
     if (score_percentage > 100.0f) score_percentage = 100.0f;
 
-    return {result_map, score_percentage}; 
+    // 返回小图 amap 即可
+    return {amap, score_percentage}; 
 }

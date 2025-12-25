@@ -11,23 +11,24 @@
 #define checkCudaErrors(val) check( (val), #val, __FILE__, __LINE__ )
 void check(cudaError_t result, char const *const func, const char *const file, int const line);
 
-// 声明 CUDA 核函数 (C 接口)
-extern "C" {
-    // 1. 全能预处理: Resize  + HWC2CHW
-    void launchPreprocessFused(
-        const unsigned char* src, float* dst,
-        int srcH, int srcW,
-        int dstH, int dstW,
-        cudaStream_t stream
-    );
+// =========================================================
+// 🔥 核心修复：确保这里的声明与 kernels.cu 完全一致
+// =========================================================
+extern "C" void launchPreprocessFused(
+    const unsigned char* src, float* dst,
+    int srcH, int srcW,
+    int dstH, int dstW,
+    cudaStream_t stream
+);
 
-    // 2. 马氏距离计算
-    void launchMahalanobisKernel(
-        float* features, float* means, float* inv_covs, float* dist_map,
-        int H, int W, int C, cudaStream_t stream
-    );
-
-}
+extern "C" void launchMahalanobisKernel(
+    const float* features, 
+    const float* means, 
+    const float* inv_covs, 
+    float* dist_map,
+    int H, int W, int C,
+    cudaStream_t stream
+);
 
 class PaDiMDetector {
 public:
@@ -41,10 +42,9 @@ private:
     void loadConfig(const std::string& configPath);
     void loadEngine(const std::string& onnxPath);
     void loadParams(const std::string& meansPath, const std::string& covsPath);
-    
     // 新增：专门分配固定大小的缓冲区 (d_input, d_features, d_dist_map)
-    // 这些缓冲区的大小只取决于模型结构 (112x112)，与输入图片实际分辨率无关
     void allocateFixedBuffers();
+    void warmup();  // 新增：热身函数
 
     // TensorRT 组件
     nvinfer1::IRuntime* runtime = nullptr;
@@ -54,19 +54,16 @@ private:
     // CUDA 流
     cudaStream_t stream = nullptr;
 
-    // GPU 内存指针
-    //1.动态缓冲区
-    unsigned char* d_raw_image = nullptr; // 存放原始大图 (动态分配)
+    unsigned char* d_raw_image = nullptr; // 存放原始大图 (预分配固定大小，最大 4K 分辨率)
     size_t d_raw_image_size = 0;          // 记录当前 d_raw_image 的容量
     
-    //2.固定缓冲区
+    
     void* d_input = nullptr;       // TensorRT 输入 (float, CHW, Normalized)
     void* d_features = nullptr;    // TensorRT 输出特征
     void* d_means = nullptr;       // 均值向量
     void* d_inv_covs = nullptr;    // 逆协方差矩阵
     void* d_dist_map = nullptr;    // 原始距离图
-    float* d_blur_map = nullptr;   // 高斯模糊后的距离图
-
+    
     // 模型参数 (从 config.txt 读取)
     int input_w = 112;
     int input_h = 112;

@@ -1,12 +1,81 @@
-﻿// filepath: [main.cpp](http://_vscodecontentref_/1)
-#include <iostream>
+﻿#include <iostream>
 #include <string>
 #include <vector>
 #include <filesystem>
 #include <opencv2/opencv.hpp>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <queue>
+#include <atomic>
 #include "PaDiMDetector.h"
 
 namespace fs = std::filesystem;
+
+// ==========================================
+// 1. 线程安全的图片缓冲区
+// ==========================================
+
+struct FrameData {
+    cv::Mat img;
+    std::string name;
+};
+
+class ImageBuffer {
+public:
+    ImageBuffer(size_t maxSize) : max_size(maxSize), stop_flag(false) {}
+
+    // 生产者调用：放入图片
+    void push(const FrameData& data) {
+        std::unique_lock<std::mutex> lock(mtx);
+        // 如果队列满了，生产者等待 (防止内存爆满)
+        not_full.wait(lock, [this] { return queue.size() < max_size || stop_flag; });
+        
+        if (stop_flag) return;
+
+        queue.push(data);
+        lock.unlock();
+        not_empty.notify_one(); // 通知消费者有货了
+    }
+
+    // 消费者调用：取出图片
+    // 返回 false 表示队列已空且生产者已停止（任务结束）
+    bool pop(FrameData& data) {
+        std::unique_lock<std::mutex> lock(mtx);
+        // 如果队列空了，消费者等待
+        not_empty.wait(lock, [this] { return !queue.empty() || stop_flag; });
+
+        if (queue.empty() && stop_flag) {
+            return false; // 任务结束
+        }
+
+        data = queue.front();
+        queue.pop();
+        lock.unlock();
+        not_full.notify_one(); // 通知生产者可以继续放了
+        return true;
+    }
+
+    // 标记生产结束
+    void stop() {
+        std::unique_lock<std::mutex> lock(mtx);
+        stop_flag = true;
+        not_empty.notify_all();
+        not_full.notify_all();
+    }
+
+private:
+    std::queue<FrameData> queue;
+    std::mutex mtx;
+    std::condition_variable not_empty;
+    std::condition_variable not_full;
+    size_t max_size;
+    std::atomic<bool> stop_flag;
+};
+
+// ==========================================
+// 2. 辅助函数
+// ==========================================
 
 bool isImageFile(const fs::path& filePath) {
     std::string ext = filePath.extension().string();
@@ -14,9 +83,13 @@ bool isImageFile(const fs::path& filePath) {
     return (ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".bmp");
 }
 
+// ==========================================
+// 3. 主程序
+// ==========================================
+
 int main() {
-    std::string modelDir = "../cpp_model_jinyuan3"; 
-    std::string testDir = "E:\\Code\\Padim\\dataset\\jinyuan3\\OK"; 
+    std::string modelDir = "../cpp_model_jinyuan1"; 
+    std::string testDir = "E:\\Code\\Padim\\dataset\\jinyuan1"; 
     std::string outputDir = "./results";
 
     std::cout << "🚀 正在初始化 PaDiM 检测器..." << std::endl;
@@ -28,7 +101,7 @@ int main() {
         return -1;
     }
 
-    // 1. 收集所有图片路径
+    // 收集路径
     std::vector<fs::path> imagePaths;
     for (const auto& entry : fs::directory_iterator(testDir)) {
         if (entry.is_regular_file() && isImageFile(entry.path())) {
@@ -41,85 +114,86 @@ int main() {
         return 0;
     }
 
-    std::cout << "📂 找到 " << imagePaths.size() << " 张图片，开始流水线处理..." << std::endl;
-
-    // 🔥 热身 (Warm-up): 跑一张空图，消除第一次推理的延迟
+    // 🔥 热身
     std::cout << "🔥 正在热身 GPU..." << std::endl;
-    cv::Mat dummy = cv::Mat::zeros(112, 112, CV_8UC3); // 假设输入是 112x112
+    cv::Mat dummy = cv::Mat::zeros(112, 112, CV_8UC3);
     detector.predict(dummy); 
     std::cout << "✅ 热身完成！" << std::endl;
 
-    // 2. 流水线循环
-    // 策略: 预读下一张 (Next)，同时推理当前张 (Current)
+    // ==========================================
+    // 🚀 启动生产者-消费者模型
+    // ==========================================
     
-    cv::Mat currImg, nextImg;
-    std::string currName, nextName;
+    // 创建缓冲区，最大容量 50 张 (防止内存溢出，同时足够缓冲 IO 波动)
+    ImageBuffer buffer(50); 
 
-    // 预读第一张
-    nextImg = cv::imread(imagePaths[0].string());
-    nextName = imagePaths[0].filename().string();
+    // --- 启动生产者线程 (负责读图) ---
+    std::thread producerThread([&]() {
+        std::cout << "🧵 [生产者] 线程启动，开始读取 " << imagePaths.size() << " 张图片..." << std::endl;
+        for (const auto& path : imagePaths) {
+            cv::Mat img = cv::imread(path.string());
+            if (!img.empty()) {
+                // 将图片推入缓冲区 (如果满了会阻塞在这里等待)
+                buffer.push({img, path.filename().string()});
+            }
+        }
+        // 读完所有图片，标记结束
+        buffer.stop();
+        std::cout << "🧵 [生产者] 图片读取完毕，线程退出。" << std::endl;
+    });
+
+    // --- 消费者逻辑 (主线程负责推理) ---
+    std::cout << "🚀 [消费者] 开始推理循环..." << std::endl;
 
     int count = 0;
     double totalTime = 0;
-    
-    // 🔥 设置异常分数阈值
-    const float anomaly_threshold = 9.0f; // 设定异常分数阈值
+    const float anomaly_threshold = 22.0f;
+    FrameData currentFrame;
 
-    for (size_t i = 0; i < imagePaths.size(); ++i) {
-        // 移交所有权: Next -> Current
-        currImg = nextImg;
-        currName = nextName;
-
-        // 🚀 关键优化: 在 GPU 推理当前张的同时，CPU 读取下一张
-        // 这样 CPU 的 IO 时间就被 GPU 的计算时间掩盖了 (Hiding Latency)
-        if (i + 1 < imagePaths.size()) {
-            nextName = imagePaths[i + 1].filename().string();
-            // 这是一个耗时操作 (~3-5ms)，现在它和 detector.predict 并行了(宏观上)
-            // 注意: 真正的并行需要多线程，但这里利用了 OS 的文件缓存和 GPU 异步特性
-            // 为了简单起见，我们先串行读，但因为 GPU 是异步的，
-            // 如果 detector.predict 内部没有强制同步 (cudaStreamSynchronize)，
-            // 那么 GPU 会在后台跑，CPU 就会立刻回来读图。
-            // *注意*: 你现在的 predict 里加了计时用的 Synchronize，所以这里还是串行的。
-            // *如果要并行*: 必须去掉 predict 里的计时同步代码！
-            nextImg = cv::imread(imagePaths[i + 1].string());
-        }
-
-        std::cout << "[" << ++count << "] 处理: " << currName << "... ";
-
-        if (currImg.empty()) continue;
+    // 只要能从缓冲区取到数据，就一直循环
+    while (buffer.pop(currentFrame)) {
+        count++;
+        // std::cout << "[" << count << "] 处理: " << currentFrame.name << "... ";
 
         auto start = std::chrono::high_resolution_clock::now();
         
         // 推理
-        auto result = detector.predict(currImg);
+        auto result = detector.predict(currentFrame.img);
         
         auto end = std::chrono::high_resolution_clock::now();
         double time = std::chrono::duration<double, std::milli>(end - start).count();
         totalTime += time;
         
-         // 获取异常得分
         float anomaly_score = result.second;
-
-        // 判断是否异常
         std::string status = (anomaly_score > anomaly_threshold) ? "异常" : "正常";
 
-        // 打印结果
-        std::cout << "异常得分: " << anomaly_score << " | 状态: " << status << " | 耗时: " << time << " ms" << std::endl;
+        std::cout << "[" << count << "] " << currentFrame.name 
+                  << " | 得分: " << anomaly_score 
+                  << " | 状态: " << status 
+                  << " | 耗时: " << time << " ms" << std::endl;
 
-        // 保存结果 (可选，也会耗时)
-        cv::imwrite(outputDir + "/" + currName, result.first);
+        // ⚠️ 注意：为了不阻塞消费者线程，建议仅在异常时保存，或者将保存任务也放入另一个线程
+        // 这里为了演示修复了之前的 imwrite 警告问题
+        if (anomaly_score > anomaly_threshold) {
+            cv::Mat amap_norm, amap_color;
+            cv::normalize(result.first, amap_norm, 0, 255, cv::NORM_MINMAX);
+            amap_norm.convertTo(amap_norm, CV_8U);
+            cv::applyColorMap(amap_norm, amap_color, cv::COLORMAP_JET);
+            cv::imwrite(outputDir + "/" + currentFrame.name, amap_color);
+        }
     }
 
-   
+    // 等待生产者线程彻底结束
+    if (producerThread.joinable()) {
+        producerThread.join();
+    }
 
     if (count > 0) {
         std::cout << "\n--------------------------------" << std::endl;
         std::cout << "✅ 处理完成！共 " << count << " 张图片" << std::endl;
-        std::cout << "⚡ 平均耗时: " << totalTime / count << " ms/张" << std::endl;
+        std::cout << "⚡ 平均推理耗时: " << totalTime / count << " ms/张" << std::endl;
         std::cout << "🚀 平均 FPS: " << 1000.0 / (totalTime / count) << std::endl;
         std::cout << "--------------------------------" << std::endl;
-    } else {
-        std::cout << "⚠️ 该文件夹下没有找到图片。" << std::endl;
     }
 
     system("pause");

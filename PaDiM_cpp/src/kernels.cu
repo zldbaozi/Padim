@@ -3,7 +3,7 @@
 #include <cmath>
 #include <stdio.h>
 
-#define MAX_DIM 1024 
+#define MAX_DIM 256
 
 // ==========================================
 // 1. 预处理核函数
