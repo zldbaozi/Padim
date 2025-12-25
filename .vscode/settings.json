@@ -1,5 +1,19 @@
 {
+    // 1. 告诉 CMake 你的 CMakeLists.txt 在哪里 (因为你打开的是父文件夹)
     "cmake.sourceDirectory": "E:/Code/PaDiM_cpp",
+    // 2. 强制指定构建目录为 PaDiM_cpp 下的 build 文件夹
+    "cmake.buildDirectory": "${workspaceFolder}/PaDiM_cpp/build",
+    // 👇👇👇 添加这一段 👇👇👇
+    "cmake.debugConfig": {
+        // 这里填你的参数
+        "args": [
+            "--model_dir=E:\\Code\\PaDiM_cpp\\cpp_model_jinyuan1",
+            "--input_dir=E:/Code/Padim/dataset/jinyuan1",
+            "--output_dir=./results"
+        ],
+        // 设定工作目录 (通常是 build/Release，或者项目根目录，取决于你的相对路径怎么写的)
+        "cwd": "E:\\Code\\PaDiM_cpp\\build\\Release"
+    },
     "files.associations": {
         "algorithm": "cpp",
         "array": "cpp",
