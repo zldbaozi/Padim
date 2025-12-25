@@ -19,7 +19,7 @@ set(CUDA_TOOLKIT_ROOT_DIR "C:/Program Files/NVIDIA GPU Computing Toolkit/CUDA/v1
 set(TENSORRT_ROOT "E:/Code/PaDiM_cpp/lib/TensorRT-8.6.1.6")
 
 # OpenCV 路径 (指向 build 目录)
-set(OpenCV_DIR "E:/Code/PaDiM_cpp/lib/opencv/build") 
+set(OpenCV_DIR "E:\\Code\\PaDiM_cpp\\lib\\opencv\\build\\x64\\vc16\\lib") 
 
 # =========================================================
 # 👆👆👆 修改上面即可，下面通常不需要动 👆👆👆

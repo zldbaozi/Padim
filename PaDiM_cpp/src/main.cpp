@@ -87,17 +87,50 @@ bool isImageFile(const fs::path& filePath) {
 // 3. 主程序
 // ==========================================
 
-int main() {
-    std::string modelDir = "../cpp_model_jinyuan1"; 
-    std::string testDir = "E:\\Code\\Padim\\dataset\\jinyuan1"; 
-    std::string outputDir = "./results";
+int main(int argc, char* argv[]) {
+    // 1. 定义命令行参数规则
+    // 格式: "{ 长参数名 短参数名 | 默认值 | 说明 }"
+    const std::string keys =
+        "{help h usage ? |      | 显示帮助信息 }"
+        "{model_dir m    |      | [必须] 模型文件夹路径 (包含 onnx 和 params) }"
+        "{input_dir i    |      | [必须] 测试图片文件夹路径 }"
+        "{output_dir o   |      | [必须] 结果保存路径 }";
+
+    cv::CommandLineParser parser(argc, argv, keys);
+    parser.about("PaDiM C++ 推理程序 v1.0");
+
+    // 如果用户输入了 -h 或 --help，打印帮助并退出
+    if (parser.has("help")) {
+        parser.printMessage();
+        return 0;
+    }
+
+    // 2. 获取参数值
+    std::string modelDir = parser.get<std::string>("model_dir");
+    std::string testDir = parser.get<std::string>("input_dir");
+    std::string outputDir = parser.get<std::string>("output_dir");
+
+    // 3. 强制检查：如果参数为空，则报错
+    if (!parser.check() || modelDir.empty() || testDir.empty() || outputDir.empty()) {
+        std::cerr << "❌ 错误: 缺少必要参数！" << std::endl;
+        std::cerr << "请务必指定 --model_dir, --input_dir 和 --output_dir" << std::endl;
+        parser.printMessage(); 
+        return -1;
+    }
+
+    // 打印当前配置
+    std::cout << "------------------------------------------------" << std::endl;
+    std::cout << "📂 模型路径: " << modelDir << std::endl;
+    std::cout << "📂 输入路径: " << testDir << std::endl;
+    std::cout << "📂 输出路径: " << outputDir << std::endl;
+    std::cout << "------------------------------------------------" << std::endl;
 
     std::cout << "🚀 正在初始化 PaDiM 检测器..." << std::endl;
     PaDiMDetector detector(modelDir);
 
     if (!fs::exists(outputDir)) fs::create_directory(outputDir);
     if (!fs::exists(testDir)) {
-        std::cerr << "❌ 文件夹不存在" << std::endl;
+        std::cerr << "❌ 输入文件夹不存在: " << testDir << std::endl;
         return -1;
     }
 

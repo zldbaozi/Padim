@@ -236,8 +236,7 @@ std::pair<cv::Mat, float> PaDiMDetector::predict(const cv::Mat& img) {
     size_t imgSize = img.rows * img.cols * 3 * sizeof(unsigned char);
 
     // 🔥 优化：移除动态扩容逻辑
-    // 我们已经在 allocateFixedBuffers 中分配了足够大的空间
-    // 如果图片真的超过 4K，这里加一个安全检查即可
+    // 我们已经在 allocateFixedBuffers 中分配了足够大的空间，如果图片真的超过 4K，这里加一个安全检查即可
     if (imgSize > d_raw_image_size) {
         std::cerr << "❌ 错误: 输入图片过大，超过预分配缓冲区!" << std::endl;
         return {cv::Mat(), 0.0f};
@@ -283,9 +282,6 @@ std::pair<cv::Mat, float> PaDiMDetector::predict(const cv::Mat& img) {
     cv::minMaxLoc(amap, &minVal, &maxVal);
 
     // ❌ 不需要 Resize 了，直接用小图计算得分
-    // cv::Mat result_map;
-    // cv::resize(amap, result_map, img.size()); 
-
     float max_threshold = 100.0f; 
     float score_percentage = (float)maxVal / max_threshold * 100.0f;
     if (score_percentage > 100.0f) score_percentage = 100.0f;
